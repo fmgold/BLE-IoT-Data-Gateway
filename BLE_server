@@ -1,0 +1,151 @@
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <DHT.h>
+
+#define DHT_PIN 4  // Pin for DHT22 sensor
+#define LDR_PIN 34  // Pin for LDR
+#define LED_PIN 15  // Pin for LED
+
+BLEServer* pServer = NULL;
+BLECharacteristic* pCharacteristic_1 = NULL;
+BLECharacteristic* pCharacteristic_2 = NULL;
+
+BLEDescriptor *pDescr_1;
+BLE2902 *pBLE2902_1;
+BLE2902 *pBLE2902_2;
+
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+uint32_t value = 0;
+
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID_1 "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define CHARACTERISTIC_UUID_2 "f73e410f-b083-452c-9c7a-995df6dce1d9"
+
+// DHT22 Setup
+DHT dht(DHT_PIN, DHT11);  // Define the DHT sensor (DHT22)
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+    }
+};
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  // Initialize DHT sensor
+  digitalWrite(LED_PIN, HIGH);
+  delay(1000);
+  digitalWrite(LED_PIN, LOW);
+  dht.begin();
+
+  // Create the BLE Device
+  BLEDevice::init("ESP32 Server");
+
+  // Create the BLE Server
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // Create the BLE Service
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Create BLE Characteristics
+  pCharacteristic_1 = pService->createCharacteristic(
+                        CHARACTERISTIC_UUID_1,
+                        BLECharacteristic::PROPERTY_READ   |
+                        BLECharacteristic::PROPERTY_WRITE  |
+                        BLECharacteristic::PROPERTY_NOTIFY |
+                        BLECharacteristic::PROPERTY_INDICATE
+                      );
+  pCharacteristic_2 = pService->createCharacteristic(
+                        CHARACTERISTIC_UUID_2,
+                        BLECharacteristic::PROPERTY_READ   |
+                        BLECharacteristic::PROPERTY_WRITE  |
+                        BLECharacteristic::PROPERTY_NOTIFY |
+                        BLECharacteristic::PROPERTY_INDICATE
+                      );
+
+  // BLE Descriptor Setup
+  pDescr_1 = new BLEDescriptor((uint16_t)0x2901);
+  pDescr_1->setValue("Sensor Data BLE");
+  pCharacteristic_1->addDescriptor(pDescr_1);
+
+  pBLE2902_1 = new BLE2902();
+  pBLE2902_1->setNotifications(true);
+  pCharacteristic_1->addDescriptor(pBLE2902_1);
+
+  pBLE2902_2 = new BLE2902();
+  pBLE2902_2->setNotifications(true);
+  pCharacteristic_2->addDescriptor(pBLE2902_2);
+
+  // Start the service
+  pService->start();
+
+  // Start advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(false);
+  pAdvertising->setMinPreferred(0x0);
+  BLEDevice::startAdvertising();
+  Serial.println("Waiting for a client connection to notify...");
+}
+
+void loop() {
+  // Check if a device is connected
+  if (deviceConnected) {
+    // Read DHT22 sensor data (Temperature and Humidity)
+    float humidity = dht.readHumidity();
+    float temperature = dht.readTemperature();
+    // Read LDR (Analog sensor, convert to voltage level)
+    int ldrValue = analogRead(LDR_PIN);
+    digitalWrite(LED_PIN, HIGH);
+
+    // Check if any readings failed
+    if (isnan(humidity) || isnan(temperature)) {
+      Serial.println("Failed to read from DHT sensor!");
+    } else {
+      // Prepare sensor data to send
+      String sensorData = "Temp: " + String(temperature);
+      String sensorData2 = "LDR Value: " + String(ldrValue);
+
+      pCharacteristic_1->setValue(sensorData.c_str());
+      pCharacteristic_1->notify();
+
+      // Send a second message (could be a status or other sensor data)
+      String message_2 = "Sensor Data Updated";
+      pCharacteristic_2->setValue(sensorData2.c_str());
+      pCharacteristic_2->notify();
+
+      // Print to Serial Monitor
+      Serial.println(sensorData);
+      Serial.println(sensorData2);
+      Serial.println("--------");
+
+    }
+
+
+    delay(5000);  // Send data every 3 seconds
+  }
+
+  // Handle device disconnection and re-advertise if needed
+  if (!deviceConnected && oldDeviceConnected) {
+    //digitalWrite(LED_PIN, HIGH);
+    //delay(1000);
+    digitalWrite(LED_PIN, LOW);
+    delay(500);  // Wait for Bluetooth stack to be ready
+    pServer->startAdvertising();  // Restart advertising
+    Serial.println("Start advertising");
+    oldDeviceConnected = deviceConnected;
+  }
+
+  if (deviceConnected && !oldDeviceConnected) {
+    oldDeviceConnected = deviceConnected;
+  }
+}
