@@ -1,0 +1,201 @@
+#include <WiFi.h>
+#include <WiFiClient.h>  // Add this for HTTP requests
+#include <HTTPClient.h>  // For ThingSpeak HTTP requests
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEClient.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
+#define WIFI_SSID " "
+#define WIFI_PASSWORD ""  // Password of WiFi SSID
+
+// ThingSpeak API Key and URL
+#define THINGSPEAK_API_KEY ""  // Replace with your ThingSpeak API key
+#define THINGSPEAK_URL ""
+
+// -------------------- BLE UUIDs ---------------------
+static BLEUUID serviceUUID("4fafc201-1fb5-459e-8fcc-c5c9c331914b");
+static BLEUUID charUUID_1("beb5483e-36e1-4688-b7f5-ea07361b26a8"); // Temp & Hum
+static BLEUUID charUUID_2("f73e410f-b083-452c-9c7a-995df6dce1d9"); // LDR
+
+// -------------------- BLE Variables ---------------------
+static BLERemoteCharacteristic* pRemoteCharacteristic_1;
+static BLERemoteCharacteristic* pRemoteCharacteristic_2;
+static BLEAdvertisedDevice* myDevice;
+BLEClient* pClient;
+bool doConnect = false;
+bool connected = false;
+String receivedData_1 = "";  // Temp & Humidity data
+String receivedData_2 = "";  // LDR data
+
+// -------------------- BLE Advertised Device Callback ---------------------
+class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+      if (advertisedDevice.haveName() && advertisedDevice.getName() == "ESP32 Server") {
+        Serial.println(String("[BLE Scan] Found BLE Server: ") + advertisedDevice.toString().c_str());
+        myDevice = new BLEAdvertisedDevice(advertisedDevice);
+        doConnect = true;
+      } else {
+        Serial.println(String("[BLE Scan] Ignored device: ") + advertisedDevice.toString().c_str());
+      }
+    }
+};
+
+// -------------------- BLE Notification Callbacks ---------------------
+void notifyCallback_1(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+  receivedData_1 = String((char*)pData);  // Temp & Humidity data
+  //Serial.println(String("[BLE Notify] Temp & Humidity: ") + receivedData_1);
+}
+
+void notifyCallback_2(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+  receivedData_2 = String((char*)pData);  // LDR data
+  //Serial.println(String("[BLE Notify] LDR: ") + receivedData_2);
+}
+
+// -------------------- Connect BLE Server ---------------------
+bool connectToServer() {
+  Serial.println(String("[BLE] Connecting to: ") + myDevice->getAddress().toString().c_str());
+
+  pClient = BLEDevice::createClient();
+  if (!pClient->connect(myDevice)) {
+    Serial.println("[BLE] Failed to connect to server");
+    return false;
+  }
+
+  BLERemoteService* pRemoteService = pClient->getService(serviceUUID);
+  if (pRemoteService == nullptr) {
+    Serial.println("[BLE] Failed to find service");
+    return false;
+  }
+
+  pRemoteCharacteristic_1 = pRemoteService->getCharacteristic(charUUID_1);
+  pRemoteCharacteristic_2 = pRemoteService->getCharacteristic(charUUID_2);
+
+  if (pRemoteCharacteristic_1 && pRemoteCharacteristic_2) {
+    Serial.println("[BLE] Found characteristics!");
+
+    if (pRemoteCharacteristic_1->canNotify()) {
+      pRemoteCharacteristic_1->registerForNotify(notifyCallback_1);
+      Serial.println("[BLE] Subscribed to Temp & Humidity notifications");
+    }
+
+    if (pRemoteCharacteristic_2->canNotify()) {
+      pRemoteCharacteristic_2->registerForNotify(notifyCallback_2);
+      Serial.println("[BLE] Subscribed to LDR notifications");
+    }
+
+    return true;
+  }
+
+  Serial.println("[BLE] Characteristics not found");
+  return false;
+}
+
+// -------------------- WiFi Connect ---------------------
+void connectToWiFi() {
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("[WiFi] Connecting");
+
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 20) {
+    delay(500);
+    Serial.print(".");
+    retries++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[WiFi] Connected ✅");
+    Serial.println(String("[WiFi] IP: ") + WiFi.localIP().toString());
+  } else {
+    Serial.println("\n[WiFi] Failed to connect ❌");
+  }
+}
+
+// -------------------- Send Data to ThingSpeak ---------------------
+void sendToThingSpeak() {
+  // Clean the received LDR data by removing non-numeric parts
+  String cleanedLdrData = receivedData_2;
+  cleanedLdrData.replace("LDR Value: ", "");
+  int ldrValue = cleanedLdrData.toInt();
+
+  // Map LDR value to 0-100 range
+  float mappedLdr = map(ldrValue, 0, 4095, 0, 100);
+  String formattedLdr = String(mappedLdr, 2);  // Format LDR to 2 decimal places
+
+  // Clean the received Temp & Humidity data
+  String cleanedTempData = receivedData_1;
+  cleanedTempData.replace("Temp: ", "");  // Remove the "Temp: " label
+  cleanedTempData.trim();  // Remove any extra spaces or non-numeric characters
+  float tempValue = cleanedTempData.toFloat();
+  String formattedTemp = String(tempValue, 2);  // Temp & Humidity
+
+  Serial.println("----------THINGSPEAK---------------");
+  Serial.print("Temp ");
+  Serial.println(formattedTemp);
+  Serial.print("LDR ");
+  Serial.println(formattedLdr);
+  Serial.print("----------------------------------");
+
+  WiFiClient client;
+  HTTPClient http;
+
+  // Prepare URL to send data
+  String url = THINGSPEAK_URL;
+  url += "?api_key=" + String(THINGSPEAK_API_KEY);
+  url += "&field1=" + formattedTemp;  // Temp & Humidity
+  url += "&field2=" + formattedLdr;  // LDR as percentage
+
+  http.begin(client, url);
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    Serial.println("[ThingSpeak] Data sent successfully");
+  } else {
+    Serial.println("[ThingSpeak] Error sending data");
+  }
+
+  http.end();
+}
+
+
+// -------------------- Setup ---------------------
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n[System] Booting...");
+
+  connectToWiFi();
+  delay(15000);
+
+  // Init BLE
+  BLEDevice::init("");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(10);
+
+  Serial.println("[System] BLE scan started");
+}
+
+// -------------------- Main Loop ---------------------
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[WiFi] Disconnected. Reconnecting...");
+    connectToWiFi();
+    return;
+  }
+
+  if (doConnect && !connected) {
+    Serial.println("[BLE] Attempting BLE connection...");
+    connected = connectToServer();
+    doConnect = false;
+  }
+
+  if (connected) {
+    // Send data to ThingSpeak
+    sendToThingSpeak();
+  }
+
+  delay(15000);  // Adjust delay to match your requirements
+}
